@@ -35,7 +35,7 @@ from api.db.services.search_service import SearchService
 from api.db.services.user_service import UserTenantService
 from common.misc_utils import get_uuid
 from api.utils.api_utils import check_duplicate_ids, get_data_openai, get_error_data_result, get_json_result, \
-    get_result, server_error_response, token_required, validate_request
+    get_result, server_error_response, token_required, validate_request, safe_parse_dsl
 from rag.app.tag import label_question
 from rag.prompts.template import load_prompt
 from rag.prompts.generator import cross_languages, gen_meta_filter, keyword_extraction, chunks_format
@@ -80,16 +80,32 @@ def create_agent_session(tenant_id, agent_id):
         return get_error_data_result("Agent not found.")
     if not UserCanvasService.query(user_id=tenant_id, id=agent_id):
         return get_error_data_result("You cannot access the agent.")
-    if not isinstance(cvs.dsl, str):
-        cvs.dsl = json.dumps(cvs.dsl, ensure_ascii=False)
+
+    # form-data (primary path as per your description)
+    raw_dsl = request.form.get("dsl")
+
+    # Be extra tolerant: if someone sends JSON instead of form-data, support that too.
+    if raw_dsl is None and request.is_json:
+        body = request.get_json(silent=True) or {}
+        raw_dsl = body.get("dsl")
+
+    # raw_dsl is a stringified JSON, but may be missing or invalid.
+    # If parsing fails, fall back to cvs.dsl.
+    dsl_str = safe_parse_dsl(raw_dsl, cvs.dsl)
 
     session_id = get_uuid()
-    canvas = Canvas(cvs.dsl, tenant_id, agent_id)
+    canvas = Canvas(dsl_str, tenant_id, agent_id)
     canvas.reset()
 
     cvs.dsl = json.loads(str(canvas))
-    conv = {"id": session_id, "dialog_id": cvs.id, "user_id": user_id,
-            "message": [{"role": "assistant", "content": canvas.get_prologue()}], "source": "agent", "dsl": cvs.dsl}
+    conv = {
+        "id": session_id, 
+        "dialog_id": cvs.id, 
+        "user_id": user_id,
+        "message": [{"role": "assistant", "content": canvas.get_prologue()}], 
+        "source": "agent", 
+        "dsl": cvs.dsl
+    }
     API4ConversationService.save(**conv)
     conv["agent_id"] = conv.pop("dialog_id")
     return get_result(data=conv)
