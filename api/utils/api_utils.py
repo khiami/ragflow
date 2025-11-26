@@ -665,43 +665,48 @@ def get_allowed_llm_factories() -> list:
 
     return [factory for factory in factories if factory.name in settings.ALLOWED_LLM_FACTORIES]
 
-
-def ensure_json_str(data: Any) -> str:
+def resolve_dsl_json(dsl: Any, fallback: Any) -> str:
     """
-    Ensure the provided data is returned as a JSON string.
+    Normalize DSL input to a JSON string.
 
-    - If it's already a string, return as-is.
-    - Otherwise try json.dumps.
-    - On failure, return an empty JSON object string.
+    - `dsl` can be dict/list/str/None.
+      * If dict/list: use as-is.
+      * If str: try json.loads; on failure, ignore and fall back.
+      * If None/other: fall back.
+
+    - `fallback` is used when `dsl` is missing or invalid.
+      It can also be dict/list/str.
+
+    Always returns a JSON string.
     """
-    if isinstance(data, str):
-        return data
 
+    def normalize(value: Any):
+        """Try to turn value into a Python object representing the DSL."""
+        if isinstance(value, (dict, list)):
+            # Already JSON-like
+            return value
+        if isinstance(value, str):
+            # Try to parse JSON string; if it fails, signal caller to fallback
+            try:
+                return json.loads(value)
+            except Exception:
+                return None
+        # Anything else: not usable
+        return None
+
+    # First, try the provided dsl
+    obj = normalize(dsl)
+
+    # If that fails, fall back
+    if obj is None:
+        obj = normalize(fallback)
+
+    # Last resort: empty object
+    if obj is None:
+        obj = {}
+
+    # Always return a JSON string, but don't explode if dump fails
     try:
-        return json.dumps(data, ensure_ascii=False)
-    except TypeError:
-        # Last-resort safety net; you can log this if you want.
+        return json.dumps(obj, ensure_ascii=False)
+    except Exception:
         return "{}"
-    
-
-def safe_parse_dsl(raw_dsl: Optional[str], fallback_dsl: Any) -> str:
-    """
-    Parse DSL from a raw string (typically body.dsl) with a graceful fallback.
-
-    - raw_dsl is expected to be a JSON-encoded string, but may be None or invalid.
-    - fallback_dsl is usually cvs.dsl (can be dict, list, or string).
-    - Always returns a JSON string suitable for Canvas(...).
-
-    If raw_dsl is invalid/unparseable, fallback_dsl is used instead.
-    """
-    if raw_dsl:
-        try:
-            parsed = json.loads(raw_dsl)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            parsed = None
-        else:
-            # Parsed successfully, now make sure we return a stringified JSON
-            return ensure_json_str(parsed)
-
-    # Either no raw_dsl provided or parsing failed: fall back
-    return ensure_json_str(fallback_dsl)    

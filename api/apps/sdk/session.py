@@ -18,6 +18,8 @@ import re
 import time
 
 import tiktoken
+import logging
+
 from quart import Response, jsonify, request
 
 from agent.canvas import Canvas
@@ -35,12 +37,15 @@ from api.db.services.search_service import SearchService
 from api.db.services.user_service import UserTenantService
 from common.misc_utils import get_uuid
 from api.utils.api_utils import check_duplicate_ids, get_data_openai, get_error_data_result, get_json_result, \
-    get_result, server_error_response, token_required, validate_request, safe_parse_dsl
+    get_result, server_error_response, token_required, validate_request, resolve_dsl_json
 from rag.app.tag import label_question
 from rag.prompts.template import load_prompt
 from rag.prompts.generator import cross_languages, gen_meta_filter, keyword_extraction, chunks_format
 from common.constants import RetCode, LLMType, StatusEnum
 from common import settings
+
+log = logging.getLogger(__name__)
+
 
 @manager.route("/chats/<chat_id>/sessions", methods=["POST"])  # noqa: F821
 @token_required
@@ -73,7 +78,7 @@ async def create(tenant_id, chat_id):
 
 @manager.route("/agents/<agent_id>/sessions", methods=["POST"])  # noqa: F821
 @token_required
-def create_agent_session(tenant_id, agent_id):
+async def create_agent_session(tenant_id, agent_id):
     user_id = request.args.get("user_id", tenant_id)
     e, cvs = UserCanvasService.get_by_id(agent_id)
     if not e:
@@ -81,35 +86,32 @@ def create_agent_session(tenant_id, agent_id):
     if not UserCanvasService.query(user_id=tenant_id, id=agent_id):
         return get_error_data_result("You cannot access the agent.")
 
-    # form-data (primary path as per your description)
-    raw_dsl = request.form.get("dsl")
+    # Original behavior: ensure cvs.dsl is a JSON string
+    if not isinstance(cvs.dsl, str):
+        cvs.dsl = json.dumps(cvs.dsl, ensure_ascii=False)
 
-    # Be extra tolerant: if someone sends JSON instead of form-data, support that too.
-    if raw_dsl is None and request.is_json:
-        body = request.get_json(silent=True) or {}
-        raw_dsl = body.get("dsl")
-
-    # raw_dsl is a stringified JSON, but may be missing or invalid.
-    # If parsing fails, fall back to cvs.dsl.
-    dsl_str = safe_parse_dsl(raw_dsl, cvs.dsl)
+    form = await request.form
+    body_dsl = form.get("dsl")
+      
+    dsl_for_canvas = resolve_dsl_json(body_dsl, cvs.dsl)
 
     session_id = get_uuid()
-    canvas = Canvas(dsl_str, tenant_id, agent_id)
+    canvas = Canvas(dsl_for_canvas, tenant_id, agent_id)
     canvas.reset()
 
     cvs.dsl = json.loads(str(canvas))
+
     conv = {
-        "id": session_id, 
-        "dialog_id": cvs.id, 
+        "id": session_id,
+        "dialog_id": cvs.id,
         "user_id": user_id,
-        "message": [{"role": "assistant", "content": canvas.get_prologue()}], 
-        "source": "agent", 
-        "dsl": cvs.dsl
+        "message": [{"role": "assistant", "content": canvas.get_prologue()}],
+        "source": "agent",
+        "dsl": cvs.dsl,
     }
     API4ConversationService.save(**conv)
     conv["agent_id"] = conv.pop("dialog_id")
     return get_result(data=conv)
-
 
 @manager.route("/chats/<chat_id>/sessions/<session_id>", methods=["PUT"])  # noqa: F821
 @token_required

@@ -23,10 +23,11 @@ from api.db.db_models import DB, CanvasTemplate, User, UserCanvas, API4Conversat
 from api.db.services.api_service import API4ConversationService
 from api.db.services.common_service import CommonService
 from common.misc_utils import get_uuid
-from api.utils.api_utils import get_data_openai, safe_parse_dsl
+from api.utils.api_utils import get_data_openai, resolve_dsl_json
 import tiktoken
 from peewee import fn
 
+log = logging.getLogger(__name__)
 
 class CanvasTemplateService(CommonService):
     model = CanvasTemplate
@@ -182,49 +183,47 @@ async def completion(tenant_id, agent_id, session_id=None, **kwargs):
     files = kwargs.get("files", [])
     inputs = kwargs.get("inputs", {})
     user_id = kwargs.get("user_id", "")
-
-    # body.dsl (stringified JSON) coming in via kwargs
-    # This should take precedence over what is stored in conv/cvs,
-    # but we fall back gracefully if it's missing or invalid.
-    raw_dsl = kwargs.get("dsl")
+    body_dsl = kwargs.get("dsl")  # optional override from caller
 
     if session_id:
-        # Existing session
         e, conv = API4ConversationService.get_by_id(session_id)
         assert e, "Session not found!"
         if not conv.message:
             conv.message = []
 
-        # conv.dsl can be dict/list/str/None; safe_parse_dsl will handle it
-        dsl_str = safe_parse_dsl(raw_dsl, getattr(conv, "dsl", {}))
-        canvas = Canvas(dsl_str, tenant_id, agent_id)
+        if not isinstance(conv.dsl, str):
+            conv.dsl = json.dumps(conv.dsl, ensure_ascii=False)
+
+        # log.warning(f"conv.dsl {conv.dsl}")
+
+        dsl_for_canvas = resolve_dsl_json(body_dsl, conv.dsl)
+        canvas = Canvas(dsl_for_canvas, tenant_id, agent_id)
     else:
-        # New session / agent
         e, cvs = UserCanvasService.get_by_id(agent_id)
         assert e, "Agent not found."
         assert cvs.user_id == tenant_id, "You do not own the agent."
 
-        # cvs.dsl may be dict/list/str/None; body.dsl takes precedence if valid
-        dsl_str = safe_parse_dsl(raw_dsl, cvs.dsl)
+        if not isinstance(cvs.dsl, str):
+            cvs.dsl = json.dumps(cvs.dsl, ensure_ascii=False)
+
+        dsl_for_canvas = resolve_dsl_json(body_dsl, cvs.dsl)
 
         session_id = get_uuid()
-        canvas = Canvas(dsl_str, tenant_id, agent_id)
+        canvas = Canvas(dsl_for_canvas, tenant_id, agent_id)
         canvas.reset()
 
-        # Keep behavior: conv.dsl is stored as the JSON string we used
         conv = {
             "id": session_id,
             "dialog_id": cvs.id,
             "user_id": user_id,
             "message": [],
             "source": "agent",
-            "dsl": dsl_str,
+            "dsl": dsl_for_canvas,
             "reference": [],
         }
         API4ConversationService.save(**conv)
         conv = API4Conversation(**conv)
 
-    # Conversation flow unchanged from here down
     message_id = str(uuid4())
     conv.message.append({
         "role": "user",
@@ -251,7 +250,7 @@ async def completion(tenant_id, agent_id, session_id=None, **kwargs):
     })
     conv.reference = canvas.get_reference()
     conv.errors = canvas.error
-    conv.dsl = str(canvas)          # keep existing behavior: store latest DSL as JSON string
+    conv.dsl = str(canvas)
     conv = conv.to_dict()
     API4ConversationService.append_message(conv["id"], conv)
 
