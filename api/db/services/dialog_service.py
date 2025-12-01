@@ -46,6 +46,7 @@ from rag.utils.tavily_conn import Tavily
 from common.string_utils import remove_redundant_spaces
 from common import settings
 
+log = logging.getLogger(__name__)
 
 class DialogService(CommonService):
     model = Dialog
@@ -186,6 +187,8 @@ def chat_solo(dialog, messages, stream=True):
         chat_mdl = LLMBundle(dialog.tenant_id, LLMType.IMAGE2TEXT, dialog.llm_id)
     else:
         chat_mdl = LLMBundle(dialog.tenant_id, LLMType.CHAT, dialog.llm_id)
+
+    log.warning(f"::dialog_service.chat_solo {messages}")
 
     prompt_config = dialog.prompt_config
     tts_mdl = None
@@ -528,6 +531,8 @@ def chat(dialog, messages, stream=True, **kwargs):
     def decorate_answer(answer):
         nonlocal embd_mdl, prompt_config, knowledges, kwargs, kbinfos, prompt, retrieval_ts, questions, langfuse_tracer
 
+        log.warning(f"::dialog_service.decorate_answer {answer}")
+
         refs = []
         ans = answer.split("</think>")
         think = ""
@@ -778,6 +783,8 @@ def ask(question, kb_ids, tenant_id, chat_llm_name=None, search_config={}):
     chat_llm_name = search_config.get("chat_id", chat_llm_name)
     rerank_id = search_config.get("rerank_id", "")
     meta_data_filter = search_config.get("meta_data_filter")
+
+    log.warning(f"::dialog_service.ask question {question}")
 
     kbs = KnowledgebaseService.get_by_ids(kb_ids)
     embedding_list = list(set([kb.embd_id for kb in kbs]))

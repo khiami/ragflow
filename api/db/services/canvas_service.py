@@ -28,6 +28,8 @@ import tiktoken
 from peewee import fn
 
 
+log = logging.getLogger(__name__)
+
 class CanvasTemplateService(CommonService):
     model = CanvasTemplate
 
@@ -221,6 +223,8 @@ async def completion(tenant_id, agent_id, session_id=None, **kwargs):
     txt = ""
     async for ans in canvas.run(query=query, files=files, user_id=user_id, inputs=inputs):
         ans["session_id"] = session_id
+        log.warning(f"::canvas_service.completion answer -> {ans}")
+
         if ans["event"] == "message":
             txt += ans["data"]["content"]
             if ans["data"].get("start_to_think", False):

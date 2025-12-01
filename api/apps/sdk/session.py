@@ -16,6 +16,7 @@
 import json
 import re
 import time
+import logging
 
 import tiktoken
 from quart import Response, jsonify, request
@@ -41,6 +42,10 @@ from rag.prompts.template import load_prompt
 from rag.prompts.generator import cross_languages, gen_meta_filter, keyword_extraction, chunks_format
 from common.constants import RetCode, LLMType, StatusEnum
 from common import settings
+
+
+log = logging.getLogger(__name__)
+
 
 @manager.route("/chats/<chat_id>/sessions", methods=["POST"])  # noqa: F821
 @token_required
@@ -471,6 +476,8 @@ async def agent_completions(tenant_id, agent_id):
     full_content = ""
     reference = {}
     final_ans = ""
+
+    log.warning(f"::session.agent_completions tenant: {tenant_id} agent: {agent_id}")
     async for answer in agent_completion(tenant_id=tenant_id, agent_id=agent_id, **req):
         try:
             ans = json.loads(answer[5:])

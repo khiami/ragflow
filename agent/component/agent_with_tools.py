@@ -34,6 +34,7 @@ from rag.prompts.generator import next_step, COMPLETE_TASK, analyze_task, \
 from common.mcp_tool_call_conn import MCPToolCallSession, mcp_tool_metadata_to_openai_tool
 from agent.component.llm import LLMParam, LLM
 
+log = logging.getLogger(__name__)
 
 class AgentParam(LLMParam, ToolParamBase):
     """
@@ -262,6 +263,7 @@ class Agent(LLM, ToolBase):
             self.set_output("use_tools", use_tools)
 
     def _gen_citations(self, text):
+        log.warning(f"::agent_with_tools._gen_citations")
         retrievals = self._canvas.get_reference()
         retrievals = {"chunks": list(retrievals["chunks"].values()), "doc_aggs": list(retrievals["doc_aggs"].values())}
         formated_refer = kb_prompt(retrievals, self.chat_mdl.max_length, True)
@@ -271,6 +273,7 @@ class Agent(LLM, ToolBase):
             yield delta_ans
 
     def _react_with_tools_streamly(self, prompt, history: list[dict], use_tools, user_defined_prompt={}, schema_prompt: str = ""):
+        log.warning(f"::agent_with_tools._react_with_tools_streamly")
         token_count = 0
         tool_metas = self.tool_meta
         hist = deepcopy(history)

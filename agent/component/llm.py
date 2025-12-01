@@ -29,6 +29,8 @@ from common.connection_utils import timeout
 from rag.prompts.generator import tool_call_summary, message_fit_in, citation_prompt, structured_output_prompt
 
 
+log = logging.getLogger(__name__)
+
 class LLMParam(ComponentParamBase):
     """
     Define the LLM component parameters.
@@ -75,7 +77,8 @@ class LLMParam(ComponentParamBase):
         if float(self.presence_penalty) > 0 and get_attr("presencePenaltyEnabled"):
             conf["presence_penalty"] = float(self.presence_penalty)
         if float(self.frequency_penalty) > 0 and get_attr("frequencyPenaltyEnabled"):
-            conf["frequency_penalty"] = float(self.frequency_penalty)
+            conf["frequency_penalty"] = float(self.frequency_penalty) 
+
         return conf
 
 
@@ -84,12 +87,101 @@ class LLM(ComponentBase):
 
     def __init__(self, canvas, component_id, param: ComponentParamBase):
         super().__init__(canvas, component_id, param)
+        
         self.chat_mdl = LLMBundle(self._canvas.get_tenant_id(), TenantLLMService.llm_id2llm_type(self._param.llm_id),
                                   self._param.llm_id, max_retries=self._param.max_retries,
                                   retry_interval=self._param.delay_after_error
                                   )
+        self._effective_llm_id = None
         self.imgs = []
+        self._refresh_chat_model()
 
+    def _compute_effective_llm_id(self) -> str:
+        """
+        Decide which llm_id string to use for this call.
+
+        Priority:
+        1. overrides['llm_id'] from Canvas inputs (normalized),
+        2. otherwise the DSL llm_id (self._param.llm_id).
+        """
+        base_llm_id = self._param.llm_id
+
+        overrides = {}
+        if hasattr(self._canvas, "get_llm_overrides"):
+            overrides = self._canvas.get_llm_overrides() or {}
+
+        override_llm_id = overrides.get("llm_id")
+        if override_llm_id:
+            llm_id = str(override_llm_id).strip()
+            # if user only gave bare model name, assume Ollama
+            if "@" not in llm_id:
+                llm_id = f"{llm_id}@Ollama"
+            return llm_id
+
+        return base_llm_id
+
+    def _refresh_chat_model(self) -> None:
+        """
+        Ensure self.chat_mdl matches the current effective llm_id.
+
+        Try the override; if it's invalid (LLM type error / not configured),
+        fall back to the DSL llm_id.
+        """
+        tenant_id = self._canvas.get_tenant_id()
+
+        def _build_bundle(llm_id_to_use: str):
+            llm_type = TenantLLMService.llm_id2llm_type(llm_id_to_use)
+            return LLMBundle(
+                tenant_id,
+                llm_type,
+                llm_id_to_use,
+                max_retries=self._param.max_retries,
+                retry_interval=self._param.delay_after_error,
+            )
+
+        # candidate from overrides (or DSL if no override)
+        candidate_id = self._compute_effective_llm_id()
+        current_id = getattr(self, "_effective_llm_id", None)
+
+        # nothing to do if model didn't change
+        if self.chat_mdl is not None and candidate_id == current_id:
+            return
+
+        try:
+            mdl = _build_bundle(candidate_id)
+            self.chat_mdl = mdl
+            self._effective_llm_id = candidate_id
+        except AssertionError as e:
+            # This is where your "LLM type error" comes from.
+            # Log + fall back to DSL-configured llm_id.
+            logging.warning(
+                "Invalid llm_id override '%s' (%s); falling back to '%s'",
+                candidate_id, e, self._param.llm_id,
+            )
+            fallback_id = self._param.llm_id
+            mdl = _build_bundle(fallback_id)
+            self.chat_mdl = mdl
+            self._effective_llm_id = fallback_id
+
+        
+    def _gen_conf_with_overrides(self) -> dict:
+        """Base gen_conf() + per-session overrides from the canvas (if any)."""
+        conf = self._param.gen_conf() or {}
+
+        # ask canvas for overrides, if it supports them
+        overrides = {}
+        if hasattr(self._canvas, "get_llm_overrides"):
+            overrides = self._canvas.get_llm_overrides() or {}
+
+        # only override known keys
+        for key in ("temperature", "top_p", "presence_penalty", "frequency_penalty", "max_tokens"):
+            value = overrides.get(key)
+            if value is not None:
+                conf[key] = value
+
+        log.warning(f"::llm._gen_conf_with_overrides conf {conf}")
+        return conf
+    
     def get_input_form(self) -> dict[str, dict]:
         res = {}
         for k, v in self.get_input_elements().items():
@@ -167,11 +259,20 @@ class LLM(ComponentBase):
         return pts, sys_prompt
 
     def _generate(self, msg:list[dict], **kwargs) -> str:
+        self._refresh_chat_model()
+        gen_conf = self._gen_conf_with_overrides()
+
+        log.warning(f"::llm._generate {kwargs}")
+        log.warning(f"::llm._generate gen_conf() {gen_conf}")
+
         if not self.imgs:
-            return self.chat_mdl.chat(msg[0]["content"], msg[1:], self._param.gen_conf(), **kwargs)
-        return self.chat_mdl.chat(msg[0]["content"], msg[1:], self._param.gen_conf(), images=self.imgs, **kwargs)
+            return self.chat_mdl.chat(msg[0]["content"], msg[1:], gen_conf, **kwargs)
+        return self.chat_mdl.chat(msg[0]["content"], msg[1:], gen_conf, images=self.imgs, **kwargs)
 
     def _generate_streamly(self, msg:list[dict], **kwargs) -> Generator[str, None, None]:
+        self._refresh_chat_model()
+        gen_conf = self._gen_conf_with_overrides()
+        log.warning(f"::llm._generate_streamly {kwargs}")
         ans = ""
         last_idx = 0
         endswith_think = False
@@ -197,19 +298,26 @@ class LLM(ComponentBase):
             if ans.endswith("</think>"):
                 last_idx -= len("</think>")
             return re.sub(r"(<think>|</think>)", "", delta_ans)
+        
 
         if not self.imgs:
-            for txt in self.chat_mdl.chat_streamly(msg[0]["content"], msg[1:], self._param.gen_conf(), **kwargs):
+            for txt in self.chat_mdl.chat_streamly(msg[0]["content"], msg[1:], gen_conf, **kwargs):
                 yield delta(txt)
         else:
-            for txt in self.chat_mdl.chat_streamly(msg[0]["content"], msg[1:], self._param.gen_conf(), images=self.imgs, **kwargs):
+            for txt in self.chat_mdl.chat_streamly(msg[0]["content"], msg[1:], gen_conf, images=self.imgs, **kwargs):
                 yield delta(txt)
 
     async def _stream_output_async(self, prompt, msg):
+        self._refresh_chat_model()
+        gen_conf = self._gen_conf_with_overrides()
+        
+        log.warning(f"::llm._stream_output_async {msg}")
         _, msg = message_fit_in([{"role": "system", "content": prompt}, *msg], int(self.chat_mdl.max_length * 0.97))
         answer = ""
         last_idx = 0
         endswith_think = False
+
+        log.warning(f"::llm._stream_output_async {gen_conf}")
 
         def delta(txt):
             nonlocal answer, last_idx, endswith_think
@@ -235,7 +343,7 @@ class LLM(ComponentBase):
             return re.sub(r"(<think>|</think>)", "", delta_ans)
 
         stream_kwargs = {"images": self.imgs} if self.imgs else {}
-        async for ans in self.chat_mdl.async_chat_streamly(msg[0]["content"], msg[1:], self._param.gen_conf(), **stream_kwargs):
+        async for ans in self.chat_mdl.async_chat_streamly(msg[0]["content"], msg[1:], gen_conf, **stream_kwargs):
             if self.check_if_canceled("LLM streaming"):
                 return
 
@@ -256,6 +364,7 @@ class LLM(ComponentBase):
 
     @timeout(int(os.environ.get("COMPONENT_EXEC_TIMEOUT", 10*60)))
     def _invoke(self, **kwargs):
+        log.warning(f"::llm._invoke kwargs {kwargs}")
         if self.check_if_canceled("LLM processing"):
             return
 
@@ -324,6 +433,7 @@ class LLM(ComponentBase):
                 self.set_output("_ERROR", error)
 
     def _stream_output(self, prompt, msg):
+        log.warning(f"::llm._stream_output prompt {prompt} msg {msg}")
         _, msg = message_fit_in([{"role": "system", "content": prompt}, *msg], int(self.chat_mdl.max_length * 0.97))
         answer = ""
         for ans in self._generate_streamly(msg):

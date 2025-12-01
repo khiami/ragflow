@@ -27,6 +27,8 @@ import trio
 from agent import settings
 from common.connection_utils import timeout
 
+log = logging.getLogger(__name__)
+
 
 _FEEDED_DEPRECATED_PARAMS = "_feeded_deprecated_params"
 _DEPRECATED_PARAMS = "_deprecated_params"
@@ -432,6 +434,7 @@ class ComponentBase(ABC):
         return False
 
     def invoke(self, **kwargs) -> dict[str, Any]:
+        log.warning(f"::base.invoke {kwargs}")
         self.set_output("_created_time", time.perf_counter())
         try:
             self._invoke(**kwargs)

@@ -34,6 +34,8 @@ from common.exceptions import TaskCanceledException
 from rag.prompts.generator import chunks_format
 from rag.utils.redis_conn import REDIS_CONN
 
+log = logging.getLogger(__name__)
+
 class Graph:
     """
         dsl = {
@@ -358,6 +360,69 @@ class Canvas(Graph):
                     self.globals[k] = ""
         print(self.globals)
                 
+    def get_llm_overrides(self) -> dict:
+        """
+        Extract per-session LLM overrides from self.globals["sys.inputs"].
+
+        Supports:
+        - numeric values:
+            {"temperature": 0.5}
+        or:
+            {"temperature": {"type": "number", "value": 0.5}}
+
+        - string values:
+            {"llm_id": "llama3:8b"}
+        or:
+            {"llm_id": {"type": "line", "value": "llama3:8b"}}
+        """
+
+        raw = self.globals.get("sys.inputs") or {}
+        overrides: dict[str, object] = {}
+
+        def extract_value(v):
+            # Handle {"type": "...", "value": ...} structure from forms
+            if isinstance(v, dict) and "value" in v:
+                return v["value"]
+            return v
+
+        # external_key -> (internal_key, cast_fn)
+        PARAM_SPECS = {
+            # numeric
+            "temperature":      ("temperature", float),
+            "topP":             ("top_p", float),
+            "top_p":            ("top_p", float),
+            "presencePenalty":  ("presence_penalty", float),
+            "presence_penalty": ("presence_penalty", float),
+            "frequencyPenalty": ("frequency_penalty", float),
+            "frequency_penalty":("frequency_penalty", float),
+            "maxTokens":        ("max_tokens", int),
+            "max_tokens":       ("max_tokens", int),
+
+            # string (line) – model override
+            "llm_id":        ("llm_id", lambda v: str(v).strip()),
+        }
+
+        for ext_key, (internal_key, caster) in PARAM_SPECS.items():
+            if ext_key not in raw:
+                continue
+
+            v = extract_value(raw[ext_key])
+            if v is None or v == "":
+                continue
+
+            try:
+                value = caster(v)
+            except (TypeError, ValueError):
+                # Ignore bad values, keep DSL defaults for that field
+                continue
+
+            if value is None or (isinstance(value, str) and not value.strip()):
+                continue
+
+            overrides[internal_key] = value
+
+        return overrides
+
 
     async def run(self, **kwargs):
         st = time.perf_counter()
@@ -380,6 +445,14 @@ class Canvas(Graph):
                     self.globals[f"sys.{k}"] = await self.get_files_async(kwargs[k])
                 else:
                     self.globals[f"sys.{k}"] = kwargs[k]
+
+        session_inputs = kwargs.get("inputs") or {}
+        if isinstance(session_inputs, dict):
+            # e.g. self.globals["sys.inputs"] = { "temperature": 0.5, ... }
+            self.globals.setdefault("sys.inputs", {}).update(session_inputs)
+            log.warning(f"::canvas.run -> set global sys.inputs {session_inputs}")
+
+
         if not self.globals["sys.conversation_turns"] :
             self.globals["sys.conversation_turns"] = 0
         self.globals["sys.conversation_turns"] += 1
@@ -413,6 +486,7 @@ class Canvas(Graph):
                 logging.info(msg)
                 raise TaskCanceledException(msg)
 
+            shared_inputs = kwargs.get("inputs", {})
             loop = asyncio.get_running_loop()
             tasks = []
             i = f
@@ -421,6 +495,7 @@ class Canvas(Graph):
                 task_fn = None
 
                 if cpn.component_name.lower() in ["begin", "userfillup"]:
+                    log.warning(f"::canvas.run BEFORE cp.invoke {shared_inputs}") # invokes -> LLM(ComponentBase) agent/component/llm.py
                     task_fn = partial(cpn.invoke, inputs=kwargs.get("inputs", {}))
                     i += 1
                 else:

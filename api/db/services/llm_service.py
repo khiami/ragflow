@@ -26,6 +26,7 @@ from api.db.db_models import LLM
 from api.db.services.common_service import CommonService
 from api.db.services.tenant_llm_service import LLM4Tenant, TenantLLMService
 
+log = logging.getLogger(__name__)
 
 class LLMService(CommonService):
     model = LLM
@@ -233,6 +234,8 @@ class LLMBundle(LLM4Tenant):
         if self.langfuse:
             generation = self.langfuse.start_generation(trace_context=self.trace_context, name="chat", model=self.llm_name, input={"system": system, "history": history})
 
+        log.warning(f"::llm_service.chat with model {list}")
+
         chat_partial = partial(self.mdl.chat, system, history, gen_conf, **kwargs)
         if self.is_tools and self.mdl.is_tools:
             chat_partial = partial(self.mdl.chat_with_tools, system, history, gen_conf, **kwargs)
@@ -256,6 +259,8 @@ class LLMBundle(LLM4Tenant):
     def chat_streamly(self, system: str, history: list, gen_conf: dict = {}, **kwargs):
         if self.langfuse:
             generation = self.langfuse.start_generation(trace_context=self.trace_context, name="chat_streamly", model=self.llm_name, input={"system": system, "history": history})
+
+        log.warning(f"::llm_service.chat_streamly with model {gen_conf}")
 
         ans = ""
         chat_partial = partial(self.mdl.chat_streamly, system, history, gen_conf)
